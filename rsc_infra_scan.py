@@ -284,34 +284,42 @@ async def main_async(verbose: bool = False, input_file: str = LIST_FILE):
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     }
 
-    async with aiohttp.ClientSession(connector=connector, headers=headers) as session:
+    # Use a dummy cookie jar so we don't attempt to parse/validate Set-Cookie headers.
+    # This avoids noisy warnings like "Illegal cookie name 'HttpOnly,SameSite'" from sites
+    # that emit malformed cookie attributes.
+    cookie_jar = aiohttp.DummyCookieJar()
+
+    async with aiohttp.ClientSession(connector=connector, headers=headers, cookie_jar=cookie_jar) as session:
+        # Create tasks for all targets up front, but consume them as they complete
         tasks = [
-            scan_target(semaphore, session, domain, url)
+            asyncio.create_task(scan_target(semaphore, session, domain, url))
             for domain, url in targets
         ]
-        results = await asyncio.gather(*tasks)
 
-    # Print results
-    if verbose:
-        # CSV format (original)
-        print("domain,status,is_rsc_like,score,signals_or_error")
-        for r in results:
-            print(r.format_output(verbose=True))
-    else:
-        # Clean table format
-        print(f"{'Status':<4} {'Domain':<40} {'is_rsc_like':<12} {'Score':<8}")
-        print("-" * 70)
-        
+        total = len(tasks)
         detected_count = 0
-        for r in results:
-            print(r.format_output(verbose=False))
-            if r.ok and r.score >= 50:
+
+        if verbose:
+            # CSV header (printed once at the top)
+            print("domain,status,is_rsc_like,score,signals_or_error")
+        else:
+            # Clean table header (printed once at the top)
+            print(f"{'Status':<4} {'Domain':<40} {'is_rsc_like':<12} {'Score':<8}")
+            print("-" * 70)
+
+        # Stream results as each task finishes, instead of waiting for all of them
+        for task in asyncio.as_completed(tasks):
+            r = await task
+            print(r.format_output(verbose=verbose))
+
+            if not verbose and r.ok and r.score >= 50:
                 detected_count += 1
-        
-        # Summary
-        print("\n" + "-" * 70)
-        print(f"Summary: {detected_count}/{len(results)} targets detected as likely RSC/Next.js infrastructure")
-        print("-" * 70 + "\n")
+
+        # Summary (only for table mode)
+        if not verbose:
+            print("\n" + "-" * 70)
+            print(f"Summary: {detected_count}/{total} targets detected as likely RSC/Next.js infrastructure")
+            print("-" * 70 + "\n")
 
 
 def main():
